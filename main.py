@@ -1,5 +1,5 @@
 import io
-from datetime import datetime
+from datetime import datetime, date
 
 import streamlit as st
 
@@ -7,16 +7,19 @@ import streamlit as st
 from reportlab.lib.pagesizes import LETTER
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
-from reportlab.lib.utils import simpleSplit
+from reportlab.lib.utils import simpleSplit, ImageReader
+
+# Merge PDFs
+from PyPDF2 import PdfMerger
+
+# Pillow (para imágenes)
+from PIL import Image
 
 
 # ----------------------------
 # Helpers PDF
 # ----------------------------
 def _draw_wrapped(c, text, x, y, max_width, font_name="Helvetica", font_size=10, leading=12):
-    """
-    Dibuja texto con salto de línea automático. Regresa el nuevo y (más abajo).
-    """
     c.setFont(font_name, font_size)
     lines = simpleSplit(text or "", font_name, font_size, max_width)
     for line in lines:
@@ -25,10 +28,8 @@ def _draw_wrapped(c, text, x, y, max_width, font_name="Helvetica", font_size=10,
     return y
 
 
-def build_pdf(data: dict) -> bytes:
-    """
-    Construye PDF en memoria y regresa bytes.
-    """
+def build_base_pdf(data: dict) -> bytes:
+    """Construye PDF base (solo ficha) y regresa bytes."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=LETTER)
     width, height = LETTER
@@ -72,7 +73,14 @@ def build_pdf(data: dict) -> bytes:
             c.showPage()
             y = top
 
+    # 0) Registro
+    section("0) Registro de la información")
+    ensure_space()
+    for k in ["Fecha de elaboración", "Registró (nombre)"]:
+        field(k, data.get(k))
+
     # 1) Identificación
+    ensure_space()
     section("1) Identificación")
     ensure_space()
     for k in [
@@ -114,7 +122,10 @@ def build_pdf(data: dict) -> bytes:
     if meds:
         for i, m in enumerate(meds, start=1):
             ensure_space(90)
-            field(f"Medicamento {i}", f"{m.get('nombre','—')} | {m.get('dosis','—')} | {m.get('frecuencia','—')} | {m.get('para_que','—')}")
+            field(
+                f"Medicamento {i}",
+                f"{m.get('nombre','—')} | {m.get('dosis','—')} | {m.get('frecuencia','—')} | {m.get('para_que','—')}"
+            )
     else:
         field("Medicamentos", "—")
 
@@ -148,10 +159,107 @@ def build_pdf(data: dict) -> bytes:
     ]:
         field(k, data.get(k))
 
+    # Anexos: listado
+    ensure_space()
+    section("Anexos (análisis previos) - listado")
+    anexos = data.get("Anexos", [])
+    if anexos:
+        for a in anexos:
+            ensure_space(70)
+            field("Archivo", a)
+    else:
+        field("Anexos", "—")
+
     c.showPage()
     c.save()
     buffer.seek(0)
     return buffer.read()
+
+
+def image_to_pdf_page(image_bytes: bytes, title: str) -> bytes:
+    """Convierte una imagen a un PDF (1+ páginas) y regresa bytes."""
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=LETTER)
+    width, height = LETTER
+
+    left = 0.75 * inch
+    right = 0.75 * inch
+    top = height - 0.75 * inch
+    bottom = 0.75 * inch
+
+    # Título
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(left, top, f"Anexo (Imagen): {title}")
+    y = top - 18
+
+    # Cargar imagen
+    img = Image.open(io.BytesIO(image_bytes))
+    img_w, img_h = img.size
+
+    # Caja disponible
+    box_w = width - left - right
+    box_h = (y - bottom)
+
+    # Escala manteniendo aspecto
+    scale = min(box_w / img_w, box_h / img_h)
+    draw_w = img_w * scale
+    draw_h = img_h * scale
+
+    x = left + (box_w - draw_w) / 2
+    y_img = bottom + (box_h - draw_h) / 2
+
+    c.drawImage(ImageReader(img), x, y_img, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+def merge_pdfs(pdf_bytes_list: list[bytes]) -> bytes:
+    merger = PdfMerger()
+    streams = []
+    try:
+        for b in pdf_bytes_list:
+            s = io.BytesIO(b)
+            streams.append(s)
+            merger.append(s)
+        out = io.BytesIO()
+        merger.write(out)
+        merger.close()
+        out.seek(0)
+        return out.read()
+    finally:
+        for s in streams:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def build_pdf_with_attachments(data: dict, uploads) -> bytes:
+    """
+    Genera el PDF final:
+    - PDF base de ficha
+    - + anexos como páginas (PDFs se anexan; imágenes se convierten a PDF y se anexan)
+    """
+    base = build_base_pdf(data)
+    parts = [base]
+
+    if uploads:
+        for uf in uploads:
+            name = uf.name
+            b = uf.getvalue()
+            # PDFs: anexar directo
+            if name.lower().endswith(".pdf"):
+                parts.append(b)
+            # Imágenes: convertir a páginas
+            elif name.lower().endswith((".png", ".jpg", ".jpeg")):
+                parts.append(image_to_pdf_page(b, name))
+            else:
+                # No anexamos otros tipos como páginas; ya se listan en el PDF
+                pass
+
+    return merge_pdfs(parts)
 
 
 # ----------------------------
@@ -159,13 +267,33 @@ def build_pdf(data: dict) -> bytes:
 # ----------------------------
 st.set_page_config(page_title="Ficha médica (Adulto mayor)", layout="wide")
 st.title("🩺 Ficha médica rápida (Adulto mayor) → PDF")
-
 st.caption("Llena el formulario y al final descarga un PDF para llevar a urgencias/consulta.")
 
 if "meds" not in st.session_state:
     st.session_state.meds = []
 
 with st.form("form_ficha", clear_on_submit=False):
+    # 0) Registro
+    st.subheader("0) Registro de la información")
+    reg_col1, reg_col2 = st.columns(2)
+    with reg_col1:
+        fecha_elab = st.date_input("Fecha de elaboración", value=date.today())
+    with reg_col2:
+        registro_por = st.text_input("¿Quién realizó el registro? (nombre)")
+
+    st.divider()
+
+    # Adjuntos
+    st.subheader("📎 Análisis previos (se anexan al MISMO PDF)")
+    uploads = st.file_uploader(
+        "Sube análisis previos en PDF o imágenes (JPG/PNG).",
+        type=["pdf", "png", "jpg", "jpeg"],
+        accept_multiple_files=True
+    )
+    st.caption("Los PDFs se agregan al final tal cual. Las imágenes se convierten a páginas y se anexan.")
+
+    st.divider()
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -266,8 +394,6 @@ with st.form("form_ficha", clear_on_submit=False):
         st.write("**Medicamentos agregados:**")
         for idx, m in enumerate(st.session_state.meds, start=1):
             st.write(f"{idx}. {m['nombre']} | {m['dosis']} | {m['frecuencia']} | {m['para_que']}")
-        if st.form_submit_button("🗑️ Borrar lista de medicamentos"):
-            st.session_state.meds = []
 
     riesgo = st.multiselect(
         "Medicamentos de riesgo (marca si aplica)",
@@ -311,12 +437,22 @@ with st.form("form_ficha", clear_on_submit=False):
     sangre = st.text_input("Tipo de sangre (si se sabe)")
     seguro = st.text_input("Seguro/afiliación (IMSS/ISSSTE/privado/etc.)")
 
-    submitted = st.form_submit_button("📄 Generar PDF")
+    submitted = st.form_submit_button("📄 Generar PDF (con anexos)")
 
 
 if submitted:
-    # Consolidar datos
+    # Lista de anexos (solo nombres en el resumen)
+    anexos_listado = []
+    if uploads:
+        for uf in uploads:
+            anexos_listado.append(uf.name)
+
     data = {
+        # Registro
+        "Fecha de elaboración": fecha_elab.strftime("%Y-%m-%d") if fecha_elab else "",
+        "Registró (nombre)": registro_por,
+
+        # Identificación
         "Nombre completo": nombre,
         "Edad": str(edad) if edad else "",
         "Sexo": sexo,
@@ -330,12 +466,14 @@ if submitted:
         "Teléfono médico": tel_medico,
         "Clínica/Hospital habitual": clinica,
 
+        # Básicos
         "Peso (kg)": f"{peso:.1f}" if peso else "",
         "Estatura (m)": f"{estatura:.2f}" if estatura else "",
         "Presión usual": presion,
         "Diabetes": diabetes,
         "Última glucosa conocida": glucosa,
 
+        # Evento
         "Motivo principal": motivo,
         "Fecha y hora de inicio": inicio,
         "Fue presenciado": presenciado,
@@ -351,45 +489,54 @@ if submitted:
         "Factores previos (alcohol/desvelo/ayuno/estrés/deshidratación)": factores,
         "Eventos similares previos": similares,
 
+        # Antecedentes
         "Enfermedades": enfermedades,
         "Otros relevantes": otros,
         "Cirugías/hospitalizaciones": cirugias,
 
+        # Medicamentos
         "Medicamentos": st.session_state.meds,
         "Riesgo meds": riesgo,
         "Última dosis conocida": ultima_dosis,
 
+        # Alergias
         "Alergia a medicamentos": alergia_meds,
         "Cuáles y reacción": cuales_reaccion,
         "Alergias alimentos/otras": alergias_otras,
         "Alergia a yodo/contraste": yodo,
         "Látex": latex,
 
+        # Hábitos
         "Tabaco": tabaco,
         "Alcohol": alcohol,
         "Otras sustancias": otras_subs,
         "Café/energizantes": cafe,
 
+        # Funcional
         "Estado habitual previo": estado_previo,
         "Movilidad": movilidad,
         "ABVD (baño/vestido/comer)": abvd,
         "Memoria/orientación habitual": memoria,
 
+        # Urgencias
         "Caídas recientes": caidas,
         "Marcapasos/implantes": implantes,
         "Vacunas/infecciones recientes": vacunas_inf,
         "Directiva anticipada": directiva,
         "Tipo de sangre": sangre,
         "Seguro/afiliación": seguro,
+
+        # Anexos (listado)
+        "Anexos": anexos_listado,
     }
 
-    pdf_bytes = build_pdf(data)
-    filename = f"Ficha_medica_{(nombre or 'paciente').replace(' ', '_')}.pdf"
+    final_pdf_bytes = build_pdf_with_attachments(data, uploads)
+    filename = f"Ficha_medica_{(nombre or 'paciente').replace(' ', '_')}_con_anexos.pdf"
 
-    st.success("PDF generado. Descárgalo aquí:")
+    st.success("PDF generado (incluye anexos al final).")
     st.download_button(
         label="⬇️ Descargar PDF",
-        data=pdf_bytes,
+        data=final_pdf_bytes,
         file_name=filename,
         mime="application/pdf",
     )
