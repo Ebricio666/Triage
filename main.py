@@ -29,7 +29,7 @@ def _draw_wrapped(c, text, x, y, max_width, font_name="Helvetica", font_size=10,
 
 
 def build_base_pdf(data: dict) -> bytes:
-    """Construye PDF base (solo ficha + listado de anexos) y regresa bytes."""
+    """Construye PDF base (ficha + listado de anexos) y regresa bytes."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=LETTER)
     width, height = LETTER
@@ -55,17 +55,23 @@ def build_base_pdf(data: dict) -> bytes:
         nonlocal y
         y -= 6
         c.setFont("Helvetica-Bold", 12)
+        c.setFillColorRGB(0, 0, 0)
         c.drawString(left, y, title)
         y -= 14
         c.setLineWidth(0.7)
         c.line(left, y, left + max_w, y)
         y -= 12
 
-    def field(label, value):
+    def field(label, value, red=False):
         nonlocal y
         text = f"{label}: {value if value not in (None, '') else '—'}"
+        if red:
+            c.setFillColorRGB(1, 0, 0)
+        else:
+            c.setFillColorRGB(0, 0, 0)
         y_new = _draw_wrapped(c, text, left, y, max_w, font_name="Helvetica", font_size=10)
         y = y_new - 2
+        c.setFillColorRGB(0, 0, 0)  # reset
 
     def ensure_space(min_space=120):
         nonlocal y
@@ -83,11 +89,30 @@ def build_base_pdf(data: dict) -> bytes:
     ensure_space()
     section("1) Identificación")
     ensure_space()
-    for k in [
-        "Nombre completo", "Edad", "Sexo", "CURP", "Domicilio",
-        "Teléfono del paciente", "Contacto de emergencia", "Parentesco", "Teléfono de contacto",
-        "Médico tratante", "Teléfono médico", "Clínica/Hospital habitual"
-    ]:
+
+    # Datos generales
+    for k in ["Nombre completo", "Edad", "Sexo", "CURP", "Domicilio", "Teléfono del paciente"]:
+        field(k, data.get(k))
+
+    # Contacto de emergencia en ROJO
+    ensure_space()
+    c.setFont("Helvetica-Bold", 11)
+    c.setFillColorRGB(1, 0, 0)
+    c.drawString(left, y, "Contacto de emergencia")
+    c.setFillColorRGB(0, 0, 0)
+    y -= 14
+
+    for k in ["Contacto de emergencia", "Parentesco", "Teléfono de contacto"]:
+        field(k, data.get(k), red=True)
+
+    # Médico/Clínica habitual
+    ensure_space()
+    c.setFont("Helvetica-Bold", 11)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawString(left, y, "Médico/Clínica habitual")
+    y -= 14
+
+    for k in ["Médico tratante", "Teléfono médico", "Clínica/Hospital habitual"]:
         field(k, data.get(k))
 
     # Obstétrico (solo si aplica)
@@ -104,18 +129,6 @@ def build_base_pdf(data: dict) -> bytes:
     ensure_space()
     section("2) Datos básicos")
     for k in ["Peso (kg)", "Estatura (m)", "Presión usual", "Diabetes", "Última glucosa conocida"]:
-        field(k, data.get(k))
-
-    # 3) Evento actual
-    ensure_space()
-    section("3) Evento actual / Motivo de atención")
-    for k in [
-        "Motivo principal", "Fecha y hora de inicio", "Fue presenciado", "Quién lo vio",
-        "Duración aproximada (min)", "Descripción del evento",
-        "Pérdida de conciencia", "Mordida de lengua", "Pérdida de orina/evacuación",
-        "Después del evento", "Lesiones por caída/golpe", "Fiebre o malestar previo",
-        "Factores previos (alcohol/desvelo/ayuno/estrés/deshidratación)", "Eventos similares previos"
-    ]:
         field(k, data.get(k))
 
     # 4) Antecedentes
@@ -170,12 +183,6 @@ def build_base_pdf(data: dict) -> bytes:
     section("8) Estado funcional y basal")
     for k in ["Estado habitual previo", "Movilidad", "ABVD (baño/vestido/comer)", "Memoria/orientación habitual"]:
         field(k, data.get(k))
-
-    # 8B) Barthel
-    ensure_space()
-    section("8B) Índice de Barthel (resumen)")
-    field("Barthel total (0-100)", data.get("Barthel total"))
-    field("Detalle Barthel", data.get("Barthel detalle"))
 
     # 8C) SARC-F
     ensure_space()
@@ -304,8 +311,6 @@ def build_pdf_with_attachments(data: dict, uploads) -> bytes:
                 parts.append(b)
             elif name.lower().endswith((".png", ".jpg", ".jpeg")):
                 parts.append(image_to_pdf_page(b, name))
-            else:
-                pass
 
     return merge_pdfs(parts)
 
@@ -315,7 +320,7 @@ def build_pdf_with_attachments(data: dict, uploads) -> bytes:
 # ----------------------------
 st.set_page_config(page_title="Ficha médica (Adulto mayor)", layout="wide")
 st.title("🩺 Ficha médica rápida (Adulto mayor) → PDF")
-st.caption("Llena el formulario y al final descarga un PDF (incluye anexos al final).")
+st.caption("Llena el formulario y descarga un PDF (incluye anexos al final).")
 
 if "meds" not in st.session_state:
     st.session_state.meds = []
@@ -354,7 +359,8 @@ with st.form("form_ficha", clear_on_submit=False):
         domicilio = st.text_area("Domicilio (opcional)", height=68)
         tel_paciente = st.text_input("Teléfono del paciente (opcional)")
 
-        st.subheader("Contacto de emergencia")
+        # Contacto (título en rojo en UI)
+        st.markdown("<h4 style='color:#d00000;margin:0'>Contacto de emergencia</h4>", unsafe_allow_html=True)
         contacto = st.text_input("Nombre contacto de emergencia")
         parentesco = st.text_input("Parentesco (hijo/a, esposa, etc.)")
         tel_contacto = st.text_input("Teléfono de contacto")
@@ -369,32 +375,10 @@ with st.form("form_ficha", clear_on_submit=False):
         peso = st.number_input("Peso (kg)", min_value=0.0, max_value=300.0, step=0.5)
         estatura = st.number_input("Estatura (m)", min_value=0.0, max_value=2.50, step=0.01)
         presion = st.text_input("Presión arterial usual (si se sabe)")
-
         diabetes = st.selectbox("¿Diabetes?", ["", "No", "Sí", "No sabe"])
         glucosa = st.text_input("Última glucosa conocida (si se sabe)")
 
-        st.subheader("3) Evento actual / motivo")
-        motivo = st.text_input("Motivo principal (en una frase)")
-        inicio = st.text_input("Fecha y hora de inicio (ej. 2025-12-14 03:10)")
-        presenciado = st.selectbox("¿Fue presenciado?", ["", "Sí", "No", "No sabe"])
-        quien_vio = st.text_input("¿Quién lo vio? (si aplica)")
-        duracion = st.number_input("Duración aproximada (min)", min_value=0, max_value=600, step=1)
-        descripcion = st.text_area("Descripción breve de lo que pasó", height=92)
-
-        perdida_conciencia = st.selectbox("¿Pérdida de conciencia?", ["", "Sí", "No", "No sabe"])
-        mordida = st.selectbox("¿Mordida de lengua?", ["", "Sí", "No", "No sabe"])
-        perdida_orina = st.selectbox("¿Pérdida de orina/evacuación?", ["", "Sí", "No", "No sabe"])
-
-        despues = st.multiselect(
-            "Después del evento (selecciona lo que aplique)",
-            ["Confusión", "Somnolencia", "Dolor muscular", "Dolor de cabeza", "Se recuperó normal", "Otro"]
-        )
-        lesiones = st.text_input("Lesiones por caída/golpe (si hubo, dónde)")
-        fiebre = st.selectbox("Fiebre/infección/malestar previo (últimos 7 días)", ["", "No", "Sí", "No sabe"])
-        factores = st.text_input("Factores previos (alcohol/desvelo/ayuno/estrés/deshidratación)")
-        similares = st.text_input("¿Eventos similares previos? (cuándo)")
-
-    # Antecedentes gineco-obstétricos si sexo femenino
+    # Gineco-obstétrico si Femenino
     if sexo == "Femenino":
         st.divider()
         st.subheader("1B) Antecedentes gineco-obstétricos (si aplica)")
@@ -408,7 +392,7 @@ with st.form("form_ficha", clear_on_submit=False):
         with g4:
             abo_a = st.number_input("Abortos (A)", min_value=0, max_value=30, step=1)
 
-        comp_ob = st.text_area("Complicaciones (preeclampsia, hemorragia, diabetes gestacional, parto prolongado, etc.)", height=60)
+        comp_ob = st.text_area("Complicaciones (preeclampsia, hemorragia, parto prolongado, etc.)", height=60)
         meno_edad = st.text_input("Menopausia (edad aprox., si aplica)")
         cir_gine = st.text_input("Cirugías ginecológicas relevantes (si aplica)")
     else:
@@ -451,7 +435,6 @@ with st.form("form_ficha", clear_on_submit=False):
     st.divider()
 
     st.subheader("5) Medicamentos actuales")
-    st.caption("Puedes agregar varios medicamentos. Si no sabes la dosis exacta, escribe lo que recuerdes o “no sabe”.")
     med_col1, med_col2, med_col3, med_col4, med_col5 = st.columns([2, 1, 1, 2, 1])
 
     with med_col1:
@@ -480,8 +463,8 @@ with st.form("form_ficha", clear_on_submit=False):
 
     riesgo = st.multiselect(
         "Medicamentos de riesgo (marca si aplica)",
-        ["Anticoagulantes", "Antiagregantes (aspirina/clopidogrel)", "Insulina/hipoglucemiantes", "Benzodiacepinas/sedantes",
-         "Antidepresivos/antipsicóticos", "Anticonvulsivos"]
+        ["Anticoagulantes", "Antiagregantes (aspirina/clopidogrel)", "Insulina/hipoglucemiantes",
+         "Benzodiacepinas/sedantes", "Antidepresivos/antipsicóticos", "Anticonvulsivos"]
     )
     ultima_dosis = st.text_input("Última dosis conocida (si se sabe)")
 
@@ -497,8 +480,8 @@ with st.form("form_ficha", clear_on_submit=False):
     st.divider()
 
     st.subheader("7) Sustancias y hábitos")
-    tabaco = st.text_input("Tabaco (ej. no / 3 al día por 20 años)")
-    alcohol = st.text_input("Alcohol (ej. no / ocasional / diario)")
+    tabaco = st.text_input("Tabaco")
+    alcohol = st.text_input("Alcohol")
     otras_subs = st.text_input("Otras sustancias (si aplica)")
     cafe = st.text_input("Café/energizantes (si aplica)")
 
@@ -510,84 +493,8 @@ with st.form("form_ficha", clear_on_submit=False):
     abvd = st.selectbox("Actividades básicas (baño/vestido/comer)", ["", "Independiente", "Requiere ayuda", "No sabe"])
     memoria = st.selectbox("Memoria/orientación habitual", ["", "Conservada", "Olvidos leves", "Deterioro importante", "No sabe"])
 
-    # Barthel
-    st.subheader("8B) Índice de Barthel (0-100)")
-    st.caption("Selección rápida tipo valoración geriátrica. (Es para orientar, no sustituye evaluación clínica).")
-
-    def opt(label_points):
-        # label_points: list of tuples (label, points)
-        labels = [f"{lab} ({pts})" for lab, pts in label_points]
-        return labels, {labels[i]: label_points[i][1] for i in range(len(labels))}
-
-    b_cols = st.columns(2)
-
-    labels, map_pts = opt([("Independiente", 10), ("Necesita ayuda", 5), ("Dependiente", 0)])
-    with b_cols[0]:
-        b_alim = st.selectbox("Alimentación", [""] + labels)
-    labels_b, map_pts_b = opt([("Independiente", 5), ("Dependiente", 0)])
-    with b_cols[1]:
-        b_bano = st.selectbox("Baño", [""] + labels_b)
-
-    labels, map_pts = opt([("Independiente", 5), ("Dependiente", 0)])
-    with b_cols[0]:
-        b_aseo = st.selectbox("Aseo personal", [""] + labels)
-    labels, map_pts = opt([("Independiente", 10), ("Necesita ayuda", 5), ("Dependiente", 0)])
-    with b_cols[1]:
-        b_vest = st.selectbox("Vestido", [""] + labels)
-
-    labels, map_pts = opt([("Continente", 10), ("Accidentes ocasionales", 5), ("Incontinente", 0)])
-    with b_cols[0]:
-        b_hec = st.selectbox("Heces", [""] + labels)
-    with b_cols[1]:
-        b_ori = st.selectbox("Orina", [""] + labels)
-
-    labels, map_pts = opt([("Independiente", 10), ("Necesita ayuda", 5), ("Dependiente", 0)])
-    with b_cols[0]:
-        b_wc = st.selectbox("Uso de WC", [""] + labels)
-
-    labels, map_pts = opt([("Independiente", 15), ("Ayuda mayor", 10), ("Ayuda menor", 5), ("Dependiente", 0)])
-    with b_cols[1]:
-        b_trans = st.selectbox("Traslado cama-silla", [""] + labels)
-
-    labels, map_pts = opt([("Independiente", 15), ("Con ayuda", 10), ("Silla de ruedas independiente", 5), ("Dependiente", 0)])
-    with b_cols[0]:
-        b_mov = st.selectbox("Deambulación/movilidad", [""] + labels)
-
-    labels, map_pts = opt([("Independiente", 10), ("Con ayuda", 5), ("Dependiente", 0)])
-    with b_cols[1]:
-        b_esc = st.selectbox("Escaleras", [""] + labels)
-
-    # Calcular Barthel
-    def pts_from(sel):
-        if not sel:
-            return 0
-        # extraer puntos del final "(X)"
-        try:
-            return int(sel.split("(")[-1].replace(")", "").strip())
-        except Exception:
-            return 0
-
-    barthel_items = {
-        "Alimentación": pts_from(b_alim),
-        "Baño": pts_from(b_bano),
-        "Aseo personal": pts_from(b_aseo),
-        "Vestido": pts_from(b_vest),
-        "Heces": pts_from(b_hec),
-        "Orina": pts_from(b_ori),
-        "Uso de WC": pts_from(b_wc),
-        "Traslado cama-silla": pts_from(b_trans),
-        "Movilidad": pts_from(b_mov),
-        "Escaleras": pts_from(b_esc),
-    }
-    barthel_total = sum(barthel_items.values())
-    barthel_detalle = ", ".join([f"{k}={v}" for k, v in barthel_items.items()])
-
-    st.write(f"**Barthel total:** {barthel_total} / 100")
-
     # SARC-F
     st.subheader("8C) SARC-F (0-10)")
-    st.caption("0=sin dificultad, 1=algo, 2=mucha/no puede (caídas: 0, 1–3, ≥4).")
-
     sarc_opts = ["", "0 - Sin dificultad", "1 - Algo de dificultad", "2 - Mucha dificultad / no puede"]
     sarc_falls = ["", "0 - 0 caídas", "1 - 1 a 3 caídas", "2 - 4 o más caídas"]
 
@@ -662,11 +569,8 @@ with st.form("form_ficha", clear_on_submit=False):
 
 
 if submitted:
-    anexos_listado = []
-    if uploads:
-        anexos_listado = [uf.name for uf in uploads]
+    anexos_listado = [uf.name for uf in uploads] if uploads else []
 
-    # Consolidar datos
     data = {
         # Registro
         "Fecha de elaboración": fecha_elab.strftime("%Y-%m-%d") if fecha_elab else "",
@@ -679,9 +583,13 @@ if submitted:
         "CURP": curp,
         "Domicilio": domicilio,
         "Teléfono del paciente": tel_paciente,
+
+        # Contacto emergencia
         "Contacto de emergencia": contacto,
         "Parentesco": parentesco,
         "Teléfono de contacto": tel_contacto,
+
+        # Médico/Clínica habitual
         "Médico tratante": medico,
         "Teléfono médico": tel_medico,
         "Clínica/Hospital habitual": clinica,
@@ -701,22 +609,6 @@ if submitted:
         "Presión usual": presion,
         "Diabetes": diabetes,
         "Última glucosa conocida": glucosa,
-
-        # Evento
-        "Motivo principal": motivo,
-        "Fecha y hora de inicio": inicio,
-        "Fue presenciado": presenciado,
-        "Quién lo vio": quien_vio,
-        "Duración aproximada (min)": str(duracion) if duracion else "",
-        "Descripción del evento": descripcion,
-        "Pérdida de conciencia": perdida_conciencia,
-        "Mordida de lengua": mordida,
-        "Pérdida de orina/evacuación": perdida_orina,
-        "Después del evento": ", ".join(despues) if despues else "",
-        "Lesiones por caída/golpe": lesiones,
-        "Fiebre o malestar previo": fiebre,
-        "Factores previos (alcohol/desvelo/ayuno/estrés/deshidratación)": factores,
-        "Eventos similares previos": similares,
 
         # Antecedentes
         "Enfermedades": enfermedades,
@@ -756,9 +648,7 @@ if submitted:
         "ABVD (baño/vestido/comer)": abvd,
         "Memoria/orientación habitual": memoria,
 
-        # Barthel/SARC-F
-        "Barthel total": str(barthel_total),
-        "Barthel detalle": barthel_detalle,
+        # SARC-F
         "SARC-F total": str(sarc_total),
         "SARC-F detalle": sarc_detalle,
 
@@ -792,7 +682,7 @@ if submitted:
         "Tipo de sangre": sangre,
         "Seguro/afiliación": seguro,
 
-        # Anexos (listado)
+        # Anexos
         "Anexos": anexos_listado,
     }
 
@@ -806,5 +696,3 @@ if submitted:
         file_name=filename,
         mime="application/pdf",
     )
-
-    st.info("Tip: si van a urgencias, también ayuda llevar foto de frascos/recetas y una identificación.")
